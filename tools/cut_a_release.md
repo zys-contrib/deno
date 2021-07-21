@@ -4,6 +4,14 @@
 release from) should be frozen and no commits should land until the release is
 cut.**
 
+## Updating `deno_std`
+
+1. Open a PR on the `deno_std` repo that bumps the version in `version.ts` and
+   updates `Releases.md`
+2. Create a tag with the version number (_without_ `v` prefix).
+
+## Updating the main repo
+
 1. Create a PR that bumps versions of all crates in `extensions` and `runtime`
    directories.
 
@@ -30,16 +38,17 @@ publish those crates.**
 This is done by running `cargo publish` in each crate, because of dependencies
 between the crates, it must be done in specific order:
 
-- `serde_v8` - `deno_core` depends on it, but this crate shouldn't change that
-  often, so you might want to skip publishing a new version if there are no
-  changes
 - `deno_core` - all crates depend on `deno_core` so it must always be published
   first
 - `bench_util`
 - crates in `extensions/` directory
-  - `deno_crypto` and `deno_webstorage` depend on `deno_web`, so the latter must
-    be bumped and released first
-  - `deno_fetch` depends on `deno_file`, so the latter must be bumped and
+  - `deno_fetch`, `deno_crypto`, `deno_timers` and `deno_webstorage` depend on
+    `deno_web`, so the latter must be bumped and released first
+  - `deno_url` depends on `deno_webidl`, so the latter must be bumped and
+    released first
+  - `deno_timers` depends on `deno_url`, so the latter must be bumped and
+    released first
+  - `deno_http` depends on `deno_websocket`, so the latter must be bumped and
     released first
 - `runtime` - this crate depends on `deno_core` and all crates in `extensions/`
   directory
@@ -70,3 +79,9 @@ The CI pipeline will create a release draft on GitHub
 
 13. Update the Deno version on the website by updating
     https://github.com/denoland/deno_website2/blob/main/versions.json.
+
+## Updating `deno_docker`
+
+1. Open a PR on the `deno_docker` repo that bumps the Deno version in all
+   Dockerfiles, the README and the example Dockerfile
+2. Create a tag with the version number (_without_ `v` prefix).

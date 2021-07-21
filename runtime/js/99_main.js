@@ -7,6 +7,21 @@ delete Object.prototype.__proto__;
 
 ((window) => {
   const core = Deno.core;
+  const {
+    Error,
+    FunctionPrototypeCall,
+    FunctionPrototypeBind,
+    ObjectAssign,
+    ObjectDefineProperty,
+    ObjectDefineProperties,
+    ObjectFreeze,
+    ObjectSetPrototypeOf,
+    PromiseResolve,
+    Symbol,
+    SymbolFor,
+    SymbolIterator,
+    PromisePrototypeThen,
+  } = window.__bootstrap.primordials;
   const util = window.__bootstrap.util;
   const eventTarget = window.__bootstrap.eventTarget;
   const globalInterfaces = window.__bootstrap.globalInterfaces;
@@ -36,11 +51,15 @@ delete Object.prototype.__proto__;
   const formData = window.__bootstrap.formData;
   const fetch = window.__bootstrap.fetch;
   const prompt = window.__bootstrap.prompt;
+  const messagePort = window.__bootstrap.messagePort;
   const denoNs = window.__bootstrap.denoNs;
   const denoNsUnstable = window.__bootstrap.denoNsUnstable;
   const errors = window.__bootstrap.errors.errors;
   const webidl = window.__bootstrap.webidl;
+  const domException = window.__bootstrap.domException;
   const { defineEventHandler } = window.__bootstrap.webUtil;
+  const { deserializeJsMessageData, serializeJsMessageData } =
+    window.__bootstrap.messagePort;
 
   let windowIsClosing = false;
 
@@ -49,15 +68,13 @@ delete Object.prototype.__proto__;
       windowIsClosing = true;
       // Push a macrotask to exit after a promise resolve.
       // This is not perfect, but should be fine for first pass.
-      Promise.resolve().then(() =>
-        timers.setTimeout.call(
-          null,
-          () => {
+      PromisePrototypeThen(
+        PromiseResolve(),
+        () =>
+          FunctionPrototypeCall(timers.setTimeout, null, () => {
             // This should be fine, since only Window/MainWorker has .close()
             os.exit(0);
-          },
-          0,
-        )
+          }, 0),
       );
     }
   }
@@ -71,61 +88,70 @@ delete Object.prototype.__proto__;
     core.opSync("op_worker_close");
   }
 
-  // TODO(bartlomieju): remove these functions
-  // Stuff for workers
-  const onmessage = () => {};
-  const onerror = () => {};
-
-  function postMessage(data) {
-    const dataIntArray = core.serialize(data);
-    core.opSync("op_worker_post_message", null, dataIntArray);
+  function postMessage(message, transferOrOptions = {}) {
+    const prefix =
+      "Failed to execute 'postMessage' on 'DedicatedWorkerGlobalScope'";
+    webidl.requiredArguments(arguments.length, 1, { prefix });
+    message = webidl.converters.any(message);
+    let options;
+    if (
+      webidl.type(transferOrOptions) === "Object" &&
+      transferOrOptions !== undefined &&
+      transferOrOptions[SymbolIterator] !== undefined
+    ) {
+      const transfer = webidl.converters["sequence<object>"](
+        transferOrOptions,
+        { prefix, context: "Argument 2" },
+      );
+      options = { transfer };
+    } else {
+      options = webidl.converters.PostMessageOptions(transferOrOptions, {
+        prefix,
+        context: "Argument 2",
+      });
+    }
+    const { transfer } = options;
+    const data = serializeJsMessageData(message, transfer);
+    core.opSync("op_worker_post_message", data);
   }
 
   let isClosing = false;
+  let globalDispatchEvent;
+
   async function pollForMessages() {
+    if (!globalDispatchEvent) {
+      globalDispatchEvent = FunctionPrototypeBind(
+        globalThis.dispatchEvent,
+        globalThis,
+      );
+    }
     while (!isClosing) {
-      const bufferMsg = await core.opAsync("op_worker_get_message");
-      const data = core.deserialize(bufferMsg);
+      const data = await core.opAsync("op_worker_recv_message");
+      if (data === null) break;
+      const v = deserializeJsMessageData(data);
+      const message = v[0];
+      const transfer = v[1];
 
       const msgEvent = new MessageEvent("message", {
         cancelable: false,
-        data,
+        data: message,
+        ports: transfer,
       });
 
       try {
-        if (globalThis.onmessage) {
-          await globalThis.onmessage(msgEvent);
-        }
-        globalThis.dispatchEvent(msgEvent);
+        globalDispatchEvent(msgEvent);
       } catch (e) {
-        let handled = false;
-
         const errorEvent = new ErrorEvent("error", {
           cancelable: true,
           message: e.message,
           lineno: e.lineNumber ? e.lineNumber + 1 : undefined,
           colno: e.columnNumber ? e.columnNumber + 1 : undefined,
           filename: e.fileName,
-          error: null,
+          error: e,
         });
 
-        if (globalThis["onerror"]) {
-          const ret = globalThis.onerror(
-            e.message,
-            e.fileName,
-            e.lineNumber,
-            e.columnNumber,
-            e,
-          );
-          handled = ret === true;
-        }
-
-        globalThis.dispatchEvent(errorEvent);
-        if (errorEvent.defaultPrevented) {
-          handled = true;
-        }
-
-        if (!handled) {
+        globalDispatchEvent(errorEvent);
+        if (!errorEvent.defaultPrevented) {
           core.opSync(
             "op_worker_unhandled_error",
             e.message,
@@ -141,6 +167,7 @@ delete Object.prototype.__proto__;
 
   function runtimeStart(runtimeOptions, source) {
     core.setMacrotaskCallback(timers.handleTimerMacrotask);
+    core.setWasmStreamingCallback(fetch.handleWasmStreaming);
     version.setVersions(
       runtimeOptions.denoVersion,
       runtimeOptions.v8Version,
@@ -185,25 +212,25 @@ delete Object.prototype.__proto__;
     core.registerErrorBuilder(
       "DOMExceptionOperationError",
       function DOMExceptionOperationError(msg) {
-        return new DOMException(msg, "OperationError");
+        return new domException.DOMException(msg, "OperationError");
       },
     );
     core.registerErrorBuilder(
       "DOMExceptionQuotaExceededError",
       function DOMExceptionQuotaExceededError(msg) {
-        return new DOMException(msg, "QuotaExceededError");
+        return new domException.DOMException(msg, "QuotaExceededError");
       },
     );
     core.registerErrorBuilder(
       "DOMExceptionNotSupportedError",
       function DOMExceptionNotSupportedError(msg) {
-        return new DOMException(msg, "NotSupported");
+        return new domException.DOMException(msg, "NotSupported");
       },
     );
     core.registerErrorBuilder(
       "DOMExceptionInvalidCharacterError",
       function DOMExceptionInvalidCharacterError(msg) {
-        return new DOMException(msg, "InvalidCharacterError");
+        return new domException.DOMException(msg, "InvalidCharacterError");
       },
     );
   }
@@ -213,14 +240,14 @@ delete Object.prototype.__proto__;
       webidl.illegalConstructor();
     }
 
-    [Symbol.for("Deno.customInspect")](inspect) {
+    [SymbolFor("Deno.privateCustomInspect")](inspect) {
       return `${this.constructor.name} ${inspect({})}`;
     }
   }
 
   const navigator = webidl.createBranded(Navigator);
 
-  Object.defineProperties(Navigator.prototype, {
+  ObjectDefineProperties(Navigator.prototype, {
     gpu: {
       configurable: true,
       enumerable: true,
@@ -236,14 +263,14 @@ delete Object.prototype.__proto__;
       webidl.illegalConstructor();
     }
 
-    [Symbol.for("Deno.customInspect")](inspect) {
+    [SymbolFor("Deno.privateCustomInspect")](inspect) {
       return `${this.constructor.name} ${inspect({})}`;
     }
   }
 
   const workerNavigator = webidl.createBranded(WorkerNavigator);
 
-  Object.defineProperties(WorkerNavigator.prototype, {
+  ObjectDefineProperties(WorkerNavigator.prototype, {
     gpu: {
       configurable: true,
       enumerable: true,
@@ -264,8 +291,9 @@ delete Object.prototype.__proto__;
     CountQueuingStrategy: util.nonEnumerable(
       streams.CountQueuingStrategy,
     ),
+    CryptoKey: util.nonEnumerable(crypto.CryptoKey),
     CustomEvent: util.nonEnumerable(CustomEvent),
-    DOMException: util.nonEnumerable(DOMException),
+    DOMException: util.nonEnumerable(domException.DOMException),
     ErrorEvent: util.nonEnumerable(ErrorEvent),
     Event: util.nonEnumerable(Event),
     EventTarget: util.nonEnumerable(EventTarget),
@@ -294,13 +322,21 @@ delete Object.prototype.__proto__;
     URLSearchParams: util.nonEnumerable(url.URLSearchParams),
     WebSocket: util.nonEnumerable(webSocket.WebSocket),
     BroadcastChannel: util.nonEnumerable(broadcastChannel.BroadcastChannel),
+    MessageChannel: util.nonEnumerable(messagePort.MessageChannel),
+    MessagePort: util.nonEnumerable(messagePort.MessagePort),
     Worker: util.nonEnumerable(worker.Worker),
     WritableStream: util.nonEnumerable(streams.WritableStream),
     WritableStreamDefaultWriter: util.nonEnumerable(
       streams.WritableStreamDefaultWriter,
     ),
+    WritableStreamDefaultController: util.nonEnumerable(
+      streams.WritableStreamDefaultController,
+    ),
     ReadableByteStreamController: util.nonEnumerable(
       streams.ReadableByteStreamController,
+    ),
+    ReadableStreamDefaultController: util.nonEnumerable(
+      streams.ReadableStreamDefaultController,
     ),
     TransformStreamDefaultController: util.nonEnumerable(
       streams.TransformStreamDefaultController,
@@ -322,7 +358,7 @@ delete Object.prototype.__proto__;
 
     GPU: util.nonEnumerable(webgpu.GPU),
     GPUAdapter: util.nonEnumerable(webgpu.GPUAdapter),
-    GPUAdapterLimits: util.nonEnumerable(webgpu.GPUAdapterLimits),
+    GPUSupportedLimits: util.nonEnumerable(webgpu.GPUSupportedLimits),
     GPUSupportedFeatures: util.nonEnumerable(webgpu.GPUSupportedFeatures),
     GPUDevice: util.nonEnumerable(webgpu.GPUDevice),
     GPUQueue: util.nonEnumerable(webgpu.GPUQueue),
@@ -404,8 +440,8 @@ delete Object.prototype.__proto__;
       get: () => workerNavigator,
     },
     self: util.readOnly(globalThis),
-    onmessage: util.writable(onmessage),
-    onerror: util.writable(onerror),
+    onmessage: util.writable(null),
+    onerror: util.writable(null),
     // TODO(bartlomieju): should be readonly?
     close: util.nonEnumerable(workerClose),
     postMessage: util.writable(postMessage),
@@ -417,20 +453,28 @@ delete Object.prototype.__proto__;
     if (hasBootstrapped) {
       throw new Error("Worker runtime already bootstrapped");
     }
+
+    const consoleFromV8 = window.console;
+    const wrapConsole = window.__bootstrap.console.wrapConsole;
+
     // Remove bootstrapping data from the global scope
     delete globalThis.__bootstrap;
     delete globalThis.bootstrap;
     util.log("bootstrapMainRuntime");
     hasBootstrapped = true;
-    Object.defineProperties(globalThis, windowOrWorkerGlobalScope);
-    Object.defineProperties(globalThis, mainRuntimeGlobalProperties);
-    Object.setPrototypeOf(globalThis, Window.prototype);
+    ObjectDefineProperties(globalThis, windowOrWorkerGlobalScope);
+    ObjectDefineProperties(globalThis, mainRuntimeGlobalProperties);
+    ObjectSetPrototypeOf(globalThis, Window.prototype);
+
+    const consoleFromDeno = globalThis.console;
+    wrapConsole(consoleFromDeno, consoleFromV8);
+
     eventTarget.setEventTargetData(globalThis);
 
     defineEventHandler(window, "load", null);
     defineEventHandler(window, "unload", null);
 
-    const isUnloadDispatched = Symbol.for("isUnloadDispatched");
+    const isUnloadDispatched = SymbolFor("isUnloadDispatched");
     // Stores the flag for checking whether unload is dispatched or not.
     // This prevents the recursive dispatches of unload events.
     // See https://github.com/denoland/deno/issues/9201.
@@ -466,24 +510,23 @@ delete Object.prototype.__proto__;
       memoryUsage: core.memoryUsage,
       ...denoNs,
     };
-    Object.defineProperties(finalDenoNs, {
+    ObjectDefineProperties(finalDenoNs, {
       pid: util.readOnly(pid),
       ppid: util.readOnly(ppid),
       noColor: util.readOnly(noColor),
-      args: util.readOnly(Object.freeze(args)),
+      args: util.readOnly(ObjectFreeze(args)),
       mainModule: util.getterOnly(opMainModule),
     });
 
     if (unstableFlag) {
-      Object.assign(finalDenoNs, denoNsUnstable);
+      ObjectAssign(finalDenoNs, denoNsUnstable);
     }
 
-    // Setup `Deno` global - we're actually overriding already
-    // existing global `Deno` with `Deno` namespace from "./deno.ts".
-    util.immutableDefine(globalThis, "Deno", finalDenoNs);
-    Object.freeze(globalThis.Deno);
-    Object.freeze(globalThis.Deno.core);
-    Object.freeze(globalThis.Deno.core.sharedQueue);
+    // Setup `Deno` global - we're actually overriding already existing global
+    // `Deno` with `Deno` namespace from "./deno.ts".
+    ObjectDefineProperty(globalThis, "Deno", util.readOnly(finalDenoNs));
+    ObjectFreeze(globalThis.Deno.core);
+    ObjectFreeze(globalThis.Deno.core.sharedQueue);
     signals.setSignals();
 
     util.log("args", args);
@@ -498,16 +541,27 @@ delete Object.prototype.__proto__;
     if (hasBootstrapped) {
       throw new Error("Worker runtime already bootstrapped");
     }
+
+    const consoleFromV8 = window.console;
+    const wrapConsole = window.__bootstrap.console.wrapConsole;
+
     // Remove bootstrapping data from the global scope
     delete globalThis.__bootstrap;
     delete globalThis.bootstrap;
     util.log("bootstrapWorkerRuntime");
     hasBootstrapped = true;
-    Object.defineProperties(globalThis, windowOrWorkerGlobalScope);
-    Object.defineProperties(globalThis, workerRuntimeGlobalProperties);
-    Object.defineProperties(globalThis, { name: util.readOnly(name) });
+    ObjectDefineProperties(globalThis, windowOrWorkerGlobalScope);
+    ObjectDefineProperties(globalThis, workerRuntimeGlobalProperties);
+    ObjectDefineProperties(globalThis, { name: util.readOnly(name) });
     Object.setPrototypeOf(globalThis, DedicatedWorkerGlobalScope.prototype);
+
+    const consoleFromDeno = globalThis.console;
+    wrapConsole(consoleFromDeno, consoleFromV8);
+
     eventTarget.setEventTargetData(globalThis);
+
+    defineEventHandler(self, "message", null);
+    defineEventHandler(self, "error", null, true);
 
     runtimeStart(
       runtimeOptions,
@@ -533,19 +587,19 @@ delete Object.prototype.__proto__;
     };
     if (useDenoNamespace) {
       if (unstableFlag) {
-        Object.assign(finalDenoNs, denoNsUnstable);
+        ObjectAssign(finalDenoNs, denoNsUnstable);
       }
-      Object.defineProperties(finalDenoNs, {
+      ObjectDefineProperties(finalDenoNs, {
         pid: util.readOnly(pid),
         noColor: util.readOnly(noColor),
-        args: util.readOnly(Object.freeze(args)),
+        args: util.readOnly(ObjectFreeze(args)),
       });
       // Setup `Deno` global - we're actually overriding already
       // existing global `Deno` with `Deno` namespace from "./deno.ts".
       util.immutableDefine(globalThis, "Deno", finalDenoNs);
-      Object.freeze(globalThis.Deno);
-      Object.freeze(globalThis.Deno.core);
-      Object.freeze(globalThis.Deno.core.sharedQueue);
+      ObjectFreeze(globalThis.Deno);
+      ObjectFreeze(globalThis.Deno.core);
+      ObjectFreeze(globalThis.Deno.core.sharedQueue);
       signals.setSignals();
     } else {
       delete globalThis.Deno;
@@ -553,7 +607,7 @@ delete Object.prototype.__proto__;
     }
   }
 
-  Object.defineProperties(globalThis, {
+  ObjectDefineProperties(globalThis, {
     bootstrap: {
       value: {
         mainRuntime: bootstrapMainRuntime,

@@ -5,10 +5,9 @@
 /// <reference path="../url/internal.d.ts" />
 /// <reference path="../url/lib.deno_url.d.ts" />
 /// <reference path="../web/internal.d.ts" />
-/// <reference path="../file/internal.d.ts" />
-/// <reference path="../file/lib.deno_file.d.ts" />
+/// <reference path="../web/lib.deno_web.d.ts" />
 /// <reference path="./internal.d.ts" />
-/// <reference path="./11_streams_types.d.ts" />
+/// <reference path="../web/06_streams_types.d.ts" />
 /// <reference path="./lib.deno_fetch.d.ts" />
 /// <reference lib="esnext" />
 "use strict";
@@ -17,11 +16,23 @@
   const core = window.Deno.core;
   const webidl = globalThis.__bootstrap.webidl;
   const { parseUrlEncoded } = globalThis.__bootstrap.url;
-  const { parseFormData, formDataFromEntries, encodeFormData } =
+  const { parseFormData, formDataFromEntries, formDataToBlob } =
     globalThis.__bootstrap.formData;
   const mimesniff = globalThis.__bootstrap.mimesniff;
-  const { isReadableStreamDisturbed, errorReadableStream } =
+  const { isReadableStreamDisturbed, errorReadableStream, createProxy } =
     globalThis.__bootstrap.streams;
+  const {
+    ArrayBufferIsView,
+    ArrayPrototypePush,
+    ArrayPrototypeMap,
+    JSONParse,
+    ObjectDefineProperties,
+    PromiseResolve,
+    TypedArrayPrototypeSet,
+    TypedArrayPrototypeSlice,
+    TypeError,
+    Uint8Array,
+  } = window.__bootstrap.primordials;
 
   class InnerBody {
     /** @type {ReadableStream<Uint8Array> | { body: Uint8Array, consumed: boolean }} */
@@ -42,14 +53,16 @@
     get stream() {
       if (!(this.streamOrStatic instanceof ReadableStream)) {
         const { body, consumed } = this.streamOrStatic;
-        this.streamOrStatic = new ReadableStream({
-          start(controller) {
-            controller.enqueue(body);
-            controller.close();
-          },
-        });
         if (consumed) {
-          this.streamOrStatic.cancel();
+          this.streamOrStatic = new ReadableStream();
+          this.streamOrStatic.getReader();
+        } else {
+          this.streamOrStatic = new ReadableStream({
+            start(controller) {
+              controller.enqueue(body);
+              controller.close();
+            },
+          });
         }
       }
       return this.streamOrStatic;
@@ -91,13 +104,13 @@
         while (true) {
           const { value: chunk, done } = await reader.read();
           if (done) break;
-          chunks.push(chunk);
+          ArrayPrototypePush(chunks, chunk);
           totalLength += chunk.byteLength;
         }
         const finalBuffer = new Uint8Array(totalLength);
         let i = 0;
         for (const chunk of chunks) {
-          finalBuffer.set(chunk, i);
+          TypedArrayPrototypeSet(finalBuffer, chunk, i);
           i += chunk.byteLength;
         }
         return finalBuffer;
@@ -134,6 +147,23 @@
       second.length = this.length;
       return second;
     }
+
+    /**
+     * @returns {InnerBody}
+     */
+    createProxy() {
+      let proxyStreamOrStatic;
+      if (this.streamOrStatic instanceof ReadableStream) {
+        proxyStreamOrStatic = createProxy(this.streamOrStatic);
+      } else {
+        proxyStreamOrStatic = { ...this.streamOrStatic };
+        this.streamOrStatic.consumed = true;
+      }
+      const proxy = new InnerBody(proxyStreamOrStatic);
+      proxy.source = this.source;
+      proxy.length = this.length;
+      return proxy;
+    }
   }
 
   /**
@@ -147,7 +177,7 @@
       if (object[bodySymbol] !== null) {
         return object[bodySymbol].consume();
       }
-      return Promise.resolve(new Uint8Array());
+      return PromiseResolve(new Uint8Array());
     }
 
     /** @type {PropertyDescriptorMap} */
@@ -237,7 +267,7 @@
         enumerable: true,
       },
     };
-    return Object.defineProperties(prototype.prototype, mixin);
+    return ObjectDefineProperties(prototype.prototype, mixin);
   }
 
   /**
@@ -256,29 +286,30 @@
         });
       case "FormData": {
         if (mimeType !== null) {
-          if (mimeType !== null) {
-            const essence = mimesniff.essence(mimeType);
-            if (essence === "multipart/form-data") {
-              const boundary = mimeType.parameters.get("boundary");
-              if (boundary === null) {
-                throw new TypeError(
-                  "Missing boundary parameter in mime type of multipart formdata.",
-                );
-              }
-              return parseFormData(bytes, boundary);
-            } else if (essence === "application/x-www-form-urlencoded") {
-              const entries = parseUrlEncoded(bytes);
-              return formDataFromEntries(
-                entries.map((x) => ({ name: x[0], value: x[1] })),
+          const essence = mimesniff.essence(mimeType);
+          if (essence === "multipart/form-data") {
+            const boundary = mimeType.parameters.get("boundary");
+            if (boundary === null) {
+              throw new TypeError(
+                "Missing boundary parameter in mime type of multipart formdata.",
               );
             }
+            return parseFormData(bytes, boundary);
+          } else if (essence === "application/x-www-form-urlencoded") {
+            const entries = parseUrlEncoded(bytes);
+            return formDataFromEntries(
+              ArrayPrototypeMap(
+                entries,
+                (x) => ({ name: x[0], value: x[1] }),
+              ),
+            );
           }
-          throw new TypeError("Invalid form data");
+          throw new TypeError("Body can not be decoded as form data");
         }
         throw new TypeError("Missing content type");
       }
       case "JSON":
-        return JSON.parse(core.decode(bytes));
+        return JSONParse(core.decode(bytes));
       case "text":
         return core.decode(bytes);
     }
@@ -301,23 +332,24 @@
       if (object.type.length !== 0) {
         contentType = object.type;
       }
-    } else if (ArrayBuffer.isView(object) || object instanceof ArrayBuffer) {
-      const u8 = ArrayBuffer.isView(object)
+    } else if (ArrayBufferIsView(object) || object instanceof ArrayBuffer) {
+      const u8 = ArrayBufferIsView(object)
         ? new Uint8Array(
           object.buffer,
           object.byteOffset,
           object.byteLength,
         )
         : new Uint8Array(object);
-      const copy = u8.slice(0, u8.byteLength);
+      const copy = TypedArrayPrototypeSlice(u8, 0, u8.byteLength);
       source = copy;
     } else if (object instanceof FormData) {
-      const res = encodeFormData(object);
-      stream = { body: res.body, consumed: false };
-      source = object;
-      length = res.body.byteLength;
-      contentType = res.contentType;
+      const res = formDataToBlob(object);
+      stream = res.stream();
+      source = res;
+      length = res.size;
+      contentType = res.type;
     } else if (object instanceof URLSearchParams) {
+      // TODO(@satyarohith): not sure what primordial here.
       source = core.encode(object.toString());
       contentType = "application/x-www-form-urlencoded;charset=UTF-8";
     } else if (typeof object === "string") {
@@ -356,7 +388,7 @@
       if (V instanceof ArrayBuffer || V instanceof SharedArrayBuffer) {
         return webidl.converters["ArrayBuffer"](V, opts);
       }
-      if (ArrayBuffer.isView(V)) {
+      if (ArrayBufferIsView(V)) {
         return webidl.converters["ArrayBufferView"](V, opts);
       }
     }

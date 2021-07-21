@@ -4,9 +4,6 @@
 /// <reference lib="esnext" />
 
 declare namespace globalThis {
-  declare var TextEncoder: typeof TextEncoder;
-  declare var TextDecoder: typeof TextDecoder;
-
   declare namespace __bootstrap {
     declare var infra: {
       collectSequenceOfCodepoints(
@@ -47,6 +44,10 @@ declare namespace globalThis {
       forgivingBase64Decode(data: string): Uint8Array;
     };
 
+    declare var domException: {
+      DOMException: typeof DOMException;
+    };
+
     declare namespace mimesniff {
       declare interface MimeType {
         type: string;
@@ -70,5 +71,28 @@ declare namespace globalThis {
       atob(data: string): string;
       btoa(data: string): string;
     };
+
+    declare var file: {
+      getParts(blob: Blob): string[];
+      Blob: typeof Blob;
+      File: typeof File;
+    };
+
+    declare var streams: {
+      ReadableStream: typeof ReadableStream;
+      isReadableStreamDisturbed(stream: ReadableStream): boolean;
+      createProxy<T>(stream: ReadableStream<T>): ReadableStream<T>;
+    };
+
+    declare namespace messagePort {
+      declare type Transferable = {
+        kind: "messagePort";
+        data: number;
+      };
+      declare interface MessageData {
+        data: Uint8Array;
+        transferables: Transferable[];
+      }
+    }
   }
 }

@@ -98,11 +98,12 @@ pub enum DenoSubcommand {
   Test {
     doc: bool,
     no_run: bool,
-    fail_fast: bool,
+    fail_fast: Option<usize>,
     quiet: bool,
     allow_none: bool,
     include: Option<Vec<String>>,
     filter: Option<String>,
+    shuffle: Option<u64>,
     concurrent_jobs: usize,
   },
   Types,
@@ -977,7 +978,7 @@ Grant permission to read allow-listed files from disk:
 
 Deno allows specifying the filename '-' to read the file from stdin.
 
-  curl https://deno.land/std/examples/welcome.ts | target/debug/deno run -",
+  curl https://deno.land/std/examples/welcome.ts | deno run -",
     )
 }
 
@@ -1000,8 +1001,23 @@ fn test_subcommand<'a, 'b>() -> App<'a, 'b> {
       Arg::with_name("fail-fast")
         .long("fail-fast")
         .alias("failfast")
-        .help("Stop on first error")
-        .takes_value(false),
+        .help("Stop after N errors. Defaults to stopping after first failure.")
+        .min_values(0)
+        .required(false)
+        .takes_value(true)
+        .require_equals(true)
+        .value_name("N")
+        .validator(|val: String| match val.parse::<usize>() {
+          Ok(val) => {
+            if val == 0 {
+              return Err(
+                "fail-fast should be an number greater than 0".to_string(),
+              );
+            }
+            Ok(())
+          }
+          Err(_) => Err("fail-fast should be a number".to_string()),
+        }),
     )
     .arg(
       Arg::with_name("allow-none")
@@ -1017,6 +1033,20 @@ fn test_subcommand<'a, 'b>() -> App<'a, 'b> {
         .help("Run tests with this string or pattern in the test name"),
     )
     .arg(
+      Arg::with_name("shuffle")
+        .long("shuffle")
+        .value_name("NUMBER")
+        .help("(UNSTABLE): Shuffle the order in which the tests are run")
+        .min_values(0)
+        .max_values(1)
+        .require_equals(true)
+        .takes_value(true)
+        .validator(|val: String| match val.parse::<u64>() {
+          Ok(_) => Ok(()),
+          Err(_) => Err("Shuffle seed should be a number".to_string()),
+        }),
+    )
+    .arg(
       Arg::with_name("coverage")
         .long("coverage")
         .require_equals(true)
@@ -1029,6 +1059,7 @@ fn test_subcommand<'a, 'b>() -> App<'a, 'b> {
       Arg::with_name("jobs")
         .short("j")
         .long("jobs")
+        .help("Number of parallel workers, defaults to # of CPUs when no value is provided. Defaults to 1 when the option is not present.")
         .min_values(0)
         .max_values(1)
         .takes_value(true)
@@ -1681,12 +1712,31 @@ fn test_parse(flags: &mut Flags, matches: &clap::ArgMatches) {
 
   let no_run = matches.is_present("no-run");
   let doc = matches.is_present("doc");
-  let fail_fast = matches.is_present("fail-fast");
   let allow_none = matches.is_present("allow-none");
   let quiet = matches.is_present("quiet");
   let filter = matches.value_of("filter").map(String::from);
 
-  flags.watch = matches.is_present("watch");
+  let fail_fast = if matches.is_present("fail-fast") {
+    if let Some(value) = matches.value_of("fail-fast") {
+      Some(value.parse().unwrap())
+    } else {
+      Some(1)
+    }
+  } else {
+    None
+  };
+
+  let shuffle = if matches.is_present("shuffle") {
+    let value = if let Some(value) = matches.value_of("shuffle") {
+      value.parse::<u64>().unwrap()
+    } else {
+      rand::random::<u64>()
+    };
+
+    Some(value)
+  } else {
+    None
+  };
 
   if matches.is_present("script_arg") {
     let script_arg: Vec<String> = matches
@@ -1723,6 +1773,7 @@ fn test_parse(flags: &mut Flags, matches: &clap::ArgMatches) {
   };
 
   flags.coverage_dir = matches.value_of("coverage").map(String::from);
+  flags.watch = matches.is_present("watch");
   flags.subcommand = DenoSubcommand::Test {
     no_run,
     doc,
@@ -1730,6 +1781,7 @@ fn test_parse(flags: &mut Flags, matches: &clap::ArgMatches) {
     quiet,
     include,
     filter,
+    shuffle,
     allow_none,
     concurrent_jobs,
   };
@@ -2297,18 +2349,6 @@ mod tests {
           ext: "ts".to_string(),
         },
         watch: true,
-        ..Flags::default()
-      }
-    );
-  }
-
-  #[test]
-  fn lsp() {
-    let r = flags_from_vec(svec!["deno", "lsp"]);
-    assert_eq!(
-      r.unwrap(),
-      Flags {
-        subcommand: DenoSubcommand::Lsp,
         ..Flags::default()
       }
     );
@@ -3373,11 +3413,12 @@ mod tests {
         subcommand: DenoSubcommand::Test {
           no_run: true,
           doc: false,
-          fail_fast: false,
+          fail_fast: None,
           filter: Some("- foo".to_string()),
           allow_none: true,
           quiet: false,
           include: Some(svec!["dir1/", "dir2/"]),
+          shuffle: None,
           concurrent_jobs: 1,
         },
         unstable: true,
@@ -3406,6 +3447,51 @@ mod tests {
           script: "script.ts".to_string(),
         },
         ca_file: Some("example.crt".to_owned()),
+        ..Flags::default()
+      }
+    );
+  }
+
+  #[test]
+  fn test_with_fail_fast() {
+    let r = flags_from_vec(svec!["deno", "test", "--fail-fast=3"]);
+    assert_eq!(
+      r.unwrap(),
+      Flags {
+        subcommand: DenoSubcommand::Test {
+          no_run: false,
+          doc: false,
+          fail_fast: Some(3),
+          filter: None,
+          allow_none: false,
+          quiet: false,
+          shuffle: None,
+          include: None,
+          concurrent_jobs: 1,
+        },
+        ..Flags::default()
+      }
+    );
+  }
+
+  #[test]
+  fn test_watch() {
+    let r = flags_from_vec(svec!["deno", "test", "--watch"]);
+    assert_eq!(
+      r.unwrap(),
+      Flags {
+        subcommand: DenoSubcommand::Test {
+          no_run: false,
+          doc: false,
+          fail_fast: None,
+          filter: None,
+          allow_none: false,
+          quiet: false,
+          shuffle: None,
+          include: None,
+          concurrent_jobs: 1,
+        },
+        watch: true,
         ..Flags::default()
       }
     );
