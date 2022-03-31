@@ -295,6 +295,7 @@ pub struct HttpStreamResource {
   wr: AsyncRefCell<HttpResponseWriter>,
   accept_encoding: RefCell<Encoding>,
   cancel_handle: CancelHandle,
+  stream_encoder: RefCell<Option<GzEncoder<Vec<u8>>>>,
 }
 
 impl HttpStreamResource {
@@ -309,6 +310,7 @@ impl HttpStreamResource {
       wr: HttpResponseWriter::Headers(response_tx).into(),
       accept_encoding: RefCell::new(Encoding::Identity),
       cancel_handle: CancelHandle::new(),
+      stream_encoder: RefCell::new(None),
     }
   }
 }
@@ -647,7 +649,13 @@ async fn op_http_write_headers(
     None => {
       // If no buffer was passed, the caller will stream the response body.
 
-      // TODO(@kitsonk) had compression for streamed bodies.
+      match *stream.accept_encoding.borrow() {
+        Encoding::Gzip => {
+          builder = builder.header("content-encoding", "gzip");
+          *stream.stream_encoder.borrow_mut() = Some(GzEncoder::new(Vec::new(), Compression::new(1)));
+        }
+        _ => {},
+      }
 
       // Set the user provided ETag & Vary headers for a streaming response
       if let Some(value) = etag_header {
