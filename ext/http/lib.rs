@@ -652,9 +652,10 @@ async fn op_http_write_headers(
       match *stream.accept_encoding.borrow() {
         Encoding::Gzip => {
           builder = builder.header("content-encoding", "gzip");
-          *stream.stream_encoder.borrow_mut() = Some(GzEncoder::new(Vec::new(), Compression::new(1)));
+          *stream.stream_encoder.borrow_mut() =
+            Some(GzEncoder::new(Vec::new(), Compression::new(1)));
         }
-        _ => {},
+        _ => {}
       }
 
       // Set the user provided ETag & Vary headers for a streaming response
@@ -709,7 +710,14 @@ async fn op_http_write(
       }
     };
 
-    let bytes = Bytes::copy_from_slice(&buf[..]);
+    let bytes =
+      if let Some(encoder) = stream.stream_encoder.borrow_mut().as_mut() {
+        encoder.write_all(&buf.as_ref())?;
+        encoder.flush()?;
+        encoder.get_mut().drain(..).collect()
+      } else {
+        Bytes::copy_from_slice(&buf[..])
+      };
     match body_tx.send_data(bytes).await {
       Ok(_) => break Ok(()),
       Err(err) => {
@@ -736,7 +744,9 @@ async fn op_http_shutdown(
     .borrow()
     .resource_table
     .get::<HttpStreamResource>(rid)?;
+
   let mut wr = RcRef::map(&stream, |r| &r.wr).borrow_mut().await;
+  wr.write_all(b"").await?;
   take(&mut *wr);
   Ok(())
 }
