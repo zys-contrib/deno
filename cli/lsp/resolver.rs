@@ -38,6 +38,7 @@ use deno_semver::package::PackageReq;
 use indexmap::IndexMap;
 use node_resolver::DenoIsBuiltInNodeModuleChecker;
 use node_resolver::NodeResolutionKind;
+use node_resolver::PackageJsonThreadLocalCache;
 use node_resolver::ResolutionMode;
 
 use super::cache::LspCache;
@@ -206,6 +207,8 @@ impl LspScopeResolver {
                   NodeResolutionKind::Execution,
                 )
               })
+              .ok()?
+              .into_url()
               .ok()?,
           ))
           .0;
@@ -256,7 +259,7 @@ impl LspScopeResolver {
                 root_node_modules_dir: byonm_npm_resolver
                   .root_node_modules_path()
                   .map(|p| p.to_path_buf()),
-                sys: CliSys::default(),
+                sys: factory.sys.clone(),
                 pkg_json_resolver: self.pkg_json_resolver.clone(),
               },
             )
@@ -521,6 +524,8 @@ impl LspResolver {
           resolution_mode,
           NodeResolutionKind::Types,
         )
+        .ok()?
+        .into_url()
         .ok()?,
     )))
   }
@@ -675,7 +680,11 @@ struct ResolverFactory<'a> {
 impl<'a> ResolverFactory<'a> {
   pub fn new(config_data: Option<&'a Arc<ConfigData>>) -> Self {
     let sys = CliSys::default();
-    let pkg_json_resolver = Arc::new(CliPackageJsonResolver::new(sys.clone()));
+    let pkg_json_resolver = Arc::new(CliPackageJsonResolver::new(
+      sys.clone(),
+      // this should be ok because we handle clearing this cache often in the LSP
+      Some(Arc::new(PackageJsonThreadLocalCache)),
+    ));
     Self {
       config_data,
       pkg_json_resolver,
@@ -697,7 +706,7 @@ impl<'a> ResolverFactory<'a> {
     let sys = CliSys::default();
     let options = if enable_byonm {
       CliNpmResolverCreateOptions::Byonm(CliByonmNpmResolverCreateOptions {
-        sys,
+        sys: self.sys.clone(),
         pkg_json_resolver: self.pkg_json_resolver.clone(),
         root_node_modules_dir: self.config_data.and_then(|config_data| {
           config_data.node_modules_dir.clone().or_else(|| {

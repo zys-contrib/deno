@@ -555,6 +555,7 @@ pub struct ResolverFactoryOptions {
   pub conditions_from_resolution_mode: ConditionsFromResolutionMode,
   pub no_sloppy_imports_cache: bool,
   pub npm_system_info: NpmSystemInfo,
+  pub package_json_cache: Option<node_resolver::PackageJsonCacheRc>,
   pub package_json_dep_resolution: Option<PackageJsonDepResolution>,
   pub specified_import_map: Option<Box<dyn SpecifiedImportMapProvider>>,
   pub unstable_sloppy_imports: bool,
@@ -638,7 +639,6 @@ impl<
     options: ResolverFactoryOptions,
   ) -> Self {
     Self {
-      options,
       deno_resolver: Default::default(),
       in_npm_package_checker: Default::default(),
       node_resolver: Default::default(),
@@ -649,6 +649,7 @@ impl<
       sloppy_imports_resolver: Default::default(),
       workspace_factory,
       workspace_resolver: Default::default(),
+      options,
     }
   }
 
@@ -792,7 +793,10 @@ impl<
 
   pub fn pkg_json_resolver(&self) -> &PackageJsonResolverRc<TSys> {
     self.pkg_json_resolver.get_or_init(|| {
-      new_rc(PackageJsonResolver::new(self.workspace_factory.sys.clone()))
+      new_rc(PackageJsonResolver::new(
+        self.workspace_factory.sys.clone(),
+        self.options.package_json_cache.clone(),
+      ))
     })
   }
 
