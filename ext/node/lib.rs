@@ -301,6 +301,7 @@ deno_core::extension!(deno_node,
     ops::crypto::x509::op_node_x509_parse,
     ops::crypto::x509::op_node_x509_ca,
     ops::crypto::x509::op_node_x509_check_email,
+    ops::crypto::x509::op_node_x509_check_host,
     ops::crypto::x509::op_node_x509_fingerprint,
     ops::crypto::x509::op_node_x509_fingerprint256,
     ops::crypto::x509::op_node_x509_fingerprint512,
@@ -374,6 +375,7 @@ deno_core::extension!(deno_node,
     ops::zlib::brotli::op_brotli_decompress_stream_end,
     ops::http::op_node_http_fetch_response_upgrade,
     ops::http::op_node_http_request_with_conn<P>,
+    ops::http::op_node_http_await_information,
     ops::http::op_node_http_await_response,
     ops::http2::op_http2_connect,
     ops::http2::op_http2_poll_client_connection,
@@ -439,7 +441,10 @@ deno_core::extension!(deno_node,
     ops::inspector::op_inspector_enabled,
   ],
   objects = [
-    ops::perf_hooks::EldHistogram
+    ops::perf_hooks::EldHistogram,
+    ops::sqlite::DatabaseSync,
+    ops::sqlite::Session,
+    ops::sqlite::StatementSync
   ],
   esm_entry_point = "ext:deno_node/02_init.js",
   esm = [
@@ -591,7 +596,6 @@ deno_core::extension!(deno_node,
     "internal/readline/utils.mjs",
     "internal/stream_base_commons.ts",
     "internal/streams/add-abort-signal.mjs",
-    "internal/streams/buffer_list.mjs",
     "internal/streams/destroy.mjs",
     "internal/streams/end-of-stream.mjs",
     "internal/streams/lazy_transform.mjs",
@@ -663,6 +667,7 @@ deno_core::extension!(deno_node,
     "node:readline" = "readline.ts",
     "node:readline/promises" = "readline/promises.ts",
     "node:repl" = "repl.ts",
+    "node:sqlite" = "sqlite.ts",
     "node:stream" = "stream.ts",
     "node:stream/consumers" = "stream/consumers.mjs",
     "node:stream/promises" = "stream/promises.mjs",
@@ -824,7 +829,15 @@ pub trait ExtNodeSys:
 {
 }
 
-impl ExtNodeSys for sys_traits::impls::RealSys {}
+impl<
+    T: sys_traits::BaseFsCanonicalize
+      + sys_traits::BaseFsMetadata
+      + sys_traits::BaseFsRead
+      + sys_traits::EnvCurrentDir
+      + Clone,
+  > ExtNodeSys for T
+{
+}
 
 pub type NodeResolver<TInNpmPackageChecker, TNpmPackageFolderResolver, TSys> =
   node_resolver::NodeResolver<

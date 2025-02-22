@@ -7,7 +7,6 @@ use std::path::Path;
 use std::path::PathBuf;
 
 use deno_error::JsErrorBox;
-use deno_path_util::url_from_file_path;
 use deno_path_util::url_to_file_path;
 use futures::future::LocalBoxFuture;
 use futures::stream::FuturesUnordered;
@@ -21,6 +20,7 @@ use sys_traits::FsMetadata;
 use sys_traits::FsRead;
 use url::Url;
 
+use crate::errors::ModuleNotFoundError;
 use crate::resolution::NodeResolverRc;
 use crate::InNpmPackageChecker;
 use crate::IsBuiltInNodeModuleChecker;
@@ -29,6 +29,8 @@ use crate::NpmPackageFolderResolver;
 use crate::PackageJsonResolverRc;
 use crate::PathClean;
 use crate::ResolutionMode;
+use crate::UrlOrPath;
+use crate::UrlOrPathRef;
 
 #[derive(Debug, Clone)]
 pub enum CjsAnalysis<'a> {
@@ -253,14 +255,21 @@ impl<
        errors: &mut Vec<JsErrorBox>| {
         // 1. Resolve the re-exports and start a future to analyze each one
         for reexport in reexports {
-          let result = self.resolve(
-            &reexport,
-            &referrer,
-            // FIXME(bartlomieju): check if these conditions are okay, probably
-            // should be `deno-require`, because `deno` is already used in `esm_resolver.rs`
-            &["deno", "node", "require", "default"],
-            NodeResolutionKind::Execution,
-          );
+          let result = self
+            .resolve(
+              &reexport,
+              &referrer,
+              // FIXME(bartlomieju): check if these conditions are okay, probably
+              // should be `deno-require`, because `deno` is already used in `esm_resolver.rs`
+              &["deno", "node", "require", "default"],
+              NodeResolutionKind::Execution,
+            )
+            .and_then(|value| {
+              value
+                .map(|url_or_path| url_or_path.into_url())
+                .transpose()
+                .map_err(JsErrorBox::from_err)
+            });
           let reexport_specifier = match result {
             Ok(Some(specifier)) => specifier,
             Ok(None) => continue,
@@ -355,18 +364,18 @@ impl<
     referrer: &Url,
     conditions: &[&str],
     resolution_kind: NodeResolutionKind,
-  ) -> Result<Option<Url>, JsErrorBox> {
+  ) -> Result<Option<UrlOrPath>, JsErrorBox> {
     if specifier.starts_with('/') {
       todo!();
     }
 
-    let referrer_path = url_to_file_path(referrer).unwrap();
+    let referrer = UrlOrPathRef::from_url(referrer);
+    let referrer_path = referrer.path().unwrap();
     if specifier.starts_with("./") || specifier.starts_with("../") {
       if let Some(parent) = referrer_path.parent() {
         return self
-          .file_extension_probe(parent.join(specifier), &referrer_path)
-          .and_then(|p| url_from_file_path(&p).map_err(JsErrorBox::from_err))
-          .map(Some);
+          .file_extension_probe(parent.join(specifier), referrer_path)
+          .map(|p| Some(UrlOrPath::Path(p)));
       } else {
         todo!();
       }
@@ -376,20 +385,21 @@ impl<
     let (package_specifier, package_subpath) =
       parse_specifier(specifier).unwrap();
 
-    let module_dir = match self
-      .npm_resolver
-      .resolve_package_folder_from_package(package_specifier.as_str(), referrer)
-    {
-      Err(err)
-        if matches!(
-          err.as_kind(),
-          crate::errors::PackageFolderResolveErrorKind::PackageNotFound(..)
-        ) =>
-      {
-        return Ok(None);
-      }
-      other => other.map_err(JsErrorBox::from_err)?,
-    };
+    let module_dir =
+      match self.npm_resolver.resolve_package_folder_from_package(
+        package_specifier.as_str(),
+        &referrer,
+      ) {
+        Err(err)
+          if matches!(
+            err.as_kind(),
+            crate::errors::PackageFolderResolveErrorKind::PackageNotFound(..)
+          ) =>
+        {
+          return Ok(None);
+        }
+        other => other.map_err(JsErrorBox::from_err)?,
+      };
 
     let package_json_path = module_dir.join("package.json");
     let maybe_package_json = self
@@ -405,7 +415,7 @@ impl<
               &package_json_path,
               &package_subpath,
               exports,
-              Some(referrer),
+              Some(&referrer),
               ResolutionMode::Import,
               conditions,
               resolution_kind,
@@ -429,39 +439,26 @@ impl<
             if let Some(main) =
               package_json.main(deno_package_json::NodeModuleKind::Cjs)
             {
-              return Ok(Some(
-                url_from_file_path(&d.join(main).clean())
-                  .map_err(JsErrorBox::from_err)?,
-              ));
+              return Ok(Some(UrlOrPath::Path(d.join(main).clean())));
             }
           }
 
-          return Ok(Some(
-            url_from_file_path(&d.join("index.js").clean())
-              .map_err(JsErrorBox::from_err)?,
-          ));
+          return Ok(Some(UrlOrPath::Path(d.join("index.js").clean())));
         }
         return self
-          .file_extension_probe(d, &referrer_path)
-          .and_then(|p| url_from_file_path(&p).map_err(JsErrorBox::from_err))
-          .map(Some);
+          .file_extension_probe(d, referrer_path)
+          .map(|p| Some(UrlOrPath::Path(p)));
       } else if let Some(main) =
         package_json.main(deno_package_json::NodeModuleKind::Cjs)
       {
-        return Ok(Some(
-          url_from_file_path(&module_dir.join(main).clean())
-            .map_err(JsErrorBox::from_err)?,
-        ));
+        return Ok(Some(UrlOrPath::Path(module_dir.join(main).clean())));
       } else {
-        return Ok(Some(
-          url_from_file_path(&module_dir.join("index.js").clean())
-            .map_err(JsErrorBox::from_err)?,
-        ));
+        return Ok(Some(UrlOrPath::Path(module_dir.join("index.js").clean())));
       }
     }
 
     // as a fallback, attempt to resolve it via the ancestor directories
-    let mut last = referrer_path.as_path();
+    let mut last = referrer_path;
     while let Some(parent) = last.parent() {
       if !self.in_npm_pkg_checker.in_npm_package_at_dir_path(parent) {
         break;
@@ -471,15 +468,18 @@ impl<
       } else {
         parent.join("node_modules").join(specifier)
       };
-      if let Ok(path) = self.file_extension_probe(path, &referrer_path) {
-        return Ok(Some(
-          url_from_file_path(&path).map_err(JsErrorBox::from_err)?,
-        ));
+      if let Ok(path) = self.file_extension_probe(path, referrer_path) {
+        return Ok(Some(UrlOrPath::Path(path)));
       }
       last = parent;
     }
 
-    Err(not_found(specifier, &referrer_path))
+    Err(JsErrorBox::from_err(ModuleNotFoundError {
+      specifier: UrlOrPath::Path(PathBuf::from(specifier)),
+      typ: "module",
+      maybe_referrer: Some(UrlOrPath::Path(referrer_path.to_path_buf())),
+      suggested_ext: None,
+    }))
   }
 
   fn file_extension_probe(
@@ -515,7 +515,12 @@ impl<
         }
       }
     }
-    Err(not_found(&p.to_string_lossy(), referrer))
+    Err(JsErrorBox::from_err(ModuleNotFoundError {
+      specifier: UrlOrPath::Path(p),
+      maybe_referrer: Some(UrlOrPath::Path(referrer.to_path_buf())),
+      typ: "module",
+      suggested_ext: None,
+    }))
   }
 }
 
@@ -674,15 +679,6 @@ fn parse_specifier(specifier: &str) -> Option<(String, String)> {
   };
 
   Some((package_name, package_subpath))
-}
-
-fn not_found(path: &str, referrer: &Path) -> JsErrorBox {
-  let msg = format!(
-    "[ERR_MODULE_NOT_FOUND] Cannot find module \"{}\" imported from \"{}\"",
-    path,
-    referrer.to_string_lossy()
-  );
-  JsErrorBox::from_err(std::io::Error::new(std::io::ErrorKind::NotFound, msg))
 }
 
 fn to_double_quote_string(text: &str) -> String {

@@ -102,6 +102,7 @@ pub struct BenchFlags {
   pub filter: Option<String>,
   pub json: bool,
   pub no_run: bool,
+  pub permit_no_files: bool,
   pub watch: Option<WatchFlags>,
 }
 
@@ -474,7 +475,7 @@ pub enum DenoSubcommand {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum OutdatedKind {
-  Update { latest: bool },
+  Update { latest: bool, interactive: bool },
   PrintOutdated { compatible: bool },
 }
 
@@ -498,6 +499,7 @@ impl DenoSubcommand {
         | Self::Jupyter(_)
         | Self::Repl(_)
         | Self::Bench(_)
+        | Self::Lint(_)
         | Self::Lsp
     )
   }
@@ -1004,7 +1006,7 @@ impl Flags {
             || module_specifier.scheme() == "npm"
           {
             if let Ok(p) = url_to_file_path(&module_specifier) {
-              Some(vec![p.parent().unwrap().to_path_buf()])
+              p.parent().map(|parent| vec![parent.to_path_buf()])
             } else {
               Some(vec![current_dir.to_path_buf()])
             }
@@ -1754,6 +1756,12 @@ If you specify a directory instead of a file, the path is expanded to all contai
           .help("Cache bench modules, but don't run benchmarks")
           .action(ArgAction::SetTrue),
       )
+      .arg(
+        Arg::new("permit-no-files")
+          .long("permit-no-files")
+          .help("Don't return an error code if no bench files were found")
+          .action(ArgAction::SetTrue)
+      )
       .arg(watch_arg(false))
       .arg(watch_exclude_arg())
       .arg(no_clear_screen_arg())
@@ -1764,7 +1772,7 @@ If you specify a directory instead of a file, the path is expanded to all contai
 }
 
 fn bundle_subcommand() -> Command {
-  command("bundle",  "⚠️ `deno bundle` was removed in Deno 2.
+  command("bundle",  "`deno bundle` was removed in Deno 2.
 
 See the Deno 1.x to 2.x Migration Guide for migration instructions: https://docs.deno.com/runtime/manual/advanced/migrate_deprecations", UnstableArgsConfig::ResolutionOnly)
     .hide(true)
@@ -1820,6 +1828,7 @@ Unless --reload is specified, this command will not re-download already cached d
     )
     .defer(|cmd| {
       compile_args_without_check_args(cmd)
+        .arg(no_code_cache_arg())
         .arg(
           Arg::new("all")
             .long("all")
@@ -2653,7 +2662,7 @@ Specific version requirements to update to can be specified:
           .long("latest")
           .action(ArgAction::SetTrue)
           .help(
-            "Update to the latest version, regardless of semver constraints",
+            "Consider the latest version, regardless of semver constraints",
           )
           .conflicts_with("compatible"),
       )
@@ -2662,15 +2671,21 @@ Specific version requirements to update to can be specified:
           .long("update")
           .short('u')
           .action(ArgAction::SetTrue)
-          .conflicts_with("compatible")
           .help("Update dependency versions"),
+      )
+      .arg(
+        Arg::new("interactive")
+          .long("interactive")
+          .short('i')
+          .action(ArgAction::SetTrue)
+          .requires("update")
+          .help("Interactively select which dependencies to update")
       )
       .arg(
         Arg::new("compatible")
           .long("compatible")
           .action(ArgAction::SetTrue)
-          .help("Only output versions that satisfy semver requirements")
-          .conflicts_with("update"),
+          .help("Only consider versions that satisfy semver requirements")
       )
       .arg(
         Arg::new("recursive")
@@ -3011,6 +3026,7 @@ Evaluate a task from string
       .allow_external_subcommands(true)
       .subcommand_value_name("TASK")
       .arg(config_arg())
+      .arg(frozen_lockfile_arg())
       .arg(
         Arg::new("cwd")
           .long("cwd")
@@ -3306,7 +3322,7 @@ different location, use the <c>--output</> flag:
 
 fn vendor_subcommand() -> Command {
   command("vendor",
-      "⚠️ `deno vendor` was removed in Deno 2.
+      "`deno vendor` was removed in Deno 2.
 
 See the Deno 1.x to 2.x Migration Guide for migration instructions: https://docs.deno.com/runtime/manual/advanced/migrate_deprecations",
       UnstableArgsConfig::ResolutionOnly
@@ -3358,8 +3374,8 @@ fn publish_subcommand() -> Command {
         .arg(
           Arg::new("set-version")
             .long("set-version")
-            .help("Set version for a package to be published.
-  <p(245)>This flag can be used while publishing individual packages and cannot be used in a workspace.</>")
+            .help(cstr!("Set version for a package to be published.
+  <p(245)>This flag can be used while publishing individual packages and cannot be used in a workspace.</>"))
             .value_name("VERSION")
             .help_heading(PUBLISH_HEADING)
         )
@@ -4455,7 +4471,11 @@ fn outdated_parse(
   let update = matches.get_flag("update");
   let kind = if update {
     let latest = matches.get_flag("latest");
-    OutdatedKind::Update { latest }
+    let interactive = matches.get_flag("interactive");
+    OutdatedKind::Update {
+      latest,
+      interactive,
+    }
   } else {
     let compatible = matches.get_flag("compatible");
     OutdatedKind::PrintOutdated { compatible }
@@ -4482,6 +4502,7 @@ fn bench_parse(
   flags.permissions.no_prompt = true;
 
   let json = matches.get_flag("json");
+  let permit_no_files = matches.get_flag("permit-no-files");
 
   let ignore = match matches.remove_many::<String>("ignore") {
     Some(f) => f
@@ -4511,6 +4532,7 @@ fn bench_parse(
     filter,
     json,
     no_run,
+    permit_no_files,
     watch: watch_arg_parse(matches)?,
   });
 
@@ -4552,6 +4574,7 @@ fn check_parse(
     doc: matches.get_flag("doc"),
     doc_only: matches.get_flag("doc-only"),
   });
+  flags.code_cache_enabled = !matches.get_flag("no-code-cache");
   allow_import_parse(flags, matches);
   Ok(())
 }
@@ -5236,6 +5259,7 @@ fn task_parse(
 
   unstable_args_parse(flags, matches, UnstableArgsConfig::ResolutionAndRuntime);
   node_modules_arg_parse(flags, matches);
+  frozen_lockfile_arg_parse(flags, matches);
 
   let mut recursive = matches.get_flag("recursive");
   let filter = if let Some(filter) = matches.remove_one::<String>("filter") {
@@ -7392,6 +7416,7 @@ mod tests {
           doc_only: false,
         }),
         type_check_mode: TypeCheckMode::Local,
+        code_cache_enabled: true,
         ..Flags::default()
       }
     );
@@ -7406,6 +7431,7 @@ mod tests {
           doc_only: false,
         }),
         type_check_mode: TypeCheckMode::Local,
+        code_cache_enabled: true,
         ..Flags::default()
       }
     );
@@ -7420,6 +7446,7 @@ mod tests {
           doc_only: true,
         }),
         type_check_mode: TypeCheckMode::Local,
+        code_cache_enabled: true,
         ..Flags::default()
       }
     );
@@ -7448,6 +7475,7 @@ mod tests {
             doc_only: false,
           }),
           type_check_mode: TypeCheckMode::All,
+          code_cache_enabled: true,
           ..Flags::default()
         }
       );
@@ -10804,6 +10832,7 @@ mod tests {
             ignore: vec![],
           },
           watch: Default::default(),
+          permit_no_files: false,
         }),
         no_npm: true,
         no_remote: true,
@@ -10835,6 +10864,34 @@ mod tests {
             ignore: vec![],
           },
           watch: Some(Default::default()),
+          permit_no_files: false
+        }),
+        permissions: PermissionFlags {
+          no_prompt: true,
+          ..Default::default()
+        },
+        type_check_mode: TypeCheckMode::Local,
+        ..Flags::default()
+      }
+    );
+  }
+
+  #[test]
+  fn bench_no_files() {
+    let r = flags_from_vec(svec!["deno", "bench", "--permit-no-files"]);
+    assert_eq!(
+      r.unwrap(),
+      Flags {
+        subcommand: DenoSubcommand::Bench(BenchFlags {
+          filter: None,
+          json: false,
+          no_run: false,
+          files: FileFlags {
+            include: vec![],
+            ignore: vec![],
+          },
+          watch: None,
+          permit_no_files: true
         }),
         permissions: PermissionFlags {
           no_prompt: true,
@@ -11608,7 +11665,10 @@ Usage: deno repl [OPTIONS] [-- [ARGS]...]\n"
         svec!["--update"],
         OutdatedFlags {
           filters: vec![],
-          kind: OutdatedKind::Update { latest: false },
+          kind: OutdatedKind::Update {
+            latest: false,
+            interactive: false,
+          },
           recursive: false,
         },
       ),
@@ -11616,7 +11676,10 @@ Usage: deno repl [OPTIONS] [-- [ARGS]...]\n"
         svec!["--update", "--latest"],
         OutdatedFlags {
           filters: vec![],
-          kind: OutdatedKind::Update { latest: true },
+          kind: OutdatedKind::Update {
+            latest: true,
+            interactive: false,
+          },
           recursive: false,
         },
       ),
@@ -11624,7 +11687,10 @@ Usage: deno repl [OPTIONS] [-- [ARGS]...]\n"
         svec!["--update", "--recursive"],
         OutdatedFlags {
           filters: vec![],
-          kind: OutdatedKind::Update { latest: false },
+          kind: OutdatedKind::Update {
+            latest: false,
+            interactive: false,
+          },
           recursive: true,
         },
       ),
@@ -11632,7 +11698,10 @@ Usage: deno repl [OPTIONS] [-- [ARGS]...]\n"
         svec!["--update", "@foo/bar"],
         OutdatedFlags {
           filters: svec!["@foo/bar"],
-          kind: OutdatedKind::Update { latest: false },
+          kind: OutdatedKind::Update {
+            latest: false,
+            interactive: false,
+          },
           recursive: false,
         },
       ),
@@ -11641,6 +11710,17 @@ Usage: deno repl [OPTIONS] [-- [ARGS]...]\n"
         OutdatedFlags {
           filters: svec![],
           kind: OutdatedKind::PrintOutdated { compatible: false },
+          recursive: false,
+        },
+      ),
+      (
+        svec!["--update", "--latest", "--interactive"],
+        OutdatedFlags {
+          filters: svec![],
+          kind: OutdatedKind::Update {
+            latest: true,
+            interactive: true,
+          },
           recursive: false,
         },
       ),

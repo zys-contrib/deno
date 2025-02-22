@@ -38,8 +38,8 @@ use deno_graph::ModuleGraphError;
 use deno_graph::Resolution;
 use deno_graph::WasmModule;
 use deno_lib::loader::ModuleCodeStringSource;
-use deno_lib::loader::NotSupportedKindInNpmError;
 use deno_lib::loader::NpmModuleLoadError;
+use deno_lib::loader::StrippingTypesNodeModulesError;
 use deno_lib::npm::NpmRegistryReadPermissionChecker;
 use deno_lib::util::hash::FastInsecureHasher;
 use deno_lib::worker::CreateModuleLoaderResult;
@@ -81,9 +81,9 @@ use crate::resolver::CliCjsTracker;
 use crate::resolver::CliNpmReqResolver;
 use crate::resolver::CliResolver;
 use crate::sys::CliSys;
-use crate::tools::check;
-use crate::tools::check::CheckError;
-use crate::tools::check::TypeChecker;
+use crate::type_checker::CheckError;
+use crate::type_checker::CheckOptions;
+use crate::type_checker::TypeChecker;
 use crate::util::progress_bar::ProgressBar;
 use crate::util::text_encoding::code_without_source_map;
 use crate::util::text_encoding::source_map_from_code;
@@ -124,6 +124,14 @@ pub struct ModuleLoadPreparer {
   type_checker: Arc<TypeChecker>,
 }
 
+pub struct PrepareModuleLoadOptions<'a> {
+  pub is_dynamic: bool,
+  pub lib: TsTypeLib,
+  pub permissions: PermissionsContainer,
+  pub ext_overwrite: Option<&'a String>,
+  pub allow_unknown_media_types: bool,
+}
+
 impl ModuleLoadPreparer {
   #[allow(clippy::too_many_arguments)]
   pub fn new(
@@ -146,17 +154,20 @@ impl ModuleLoadPreparer {
   /// module before attempting to `load()` it from a `JsRuntime`. It will
   /// populate the graph data in memory with the necessary source code, write
   /// emits where necessary or report any module graph / type checking errors.
-  #[allow(clippy::too_many_arguments)]
   pub async fn prepare_module_load(
     &self,
     graph: &mut ModuleGraph,
     roots: &[ModuleSpecifier],
-    is_dynamic: bool,
-    lib: TsTypeLib,
-    permissions: PermissionsContainer,
-    ext_overwrite: Option<&String>,
+    options: PrepareModuleLoadOptions<'_>,
   ) -> Result<(), PrepareModuleLoadError> {
     log::debug!("Preparing module load.");
+    let PrepareModuleLoadOptions {
+      is_dynamic,
+      lib,
+      permissions,
+      ext_overwrite,
+      allow_unknown_media_types,
+    } = options;
     let _pb_clear_guard = self.progress_bar.clear_guard();
 
     let mut cache = self.module_graph_builder.create_fetch_cacher(permissions);
@@ -197,7 +208,7 @@ impl ModuleLoadPreparer {
       )
       .await?;
 
-    self.graph_roots_valid(graph, roots)?;
+    self.graph_roots_valid(graph, roots, allow_unknown_media_types)?;
 
     // write the lockfile if there is one
     if let Some(lockfile) = &self.lockfile {
@@ -216,10 +227,9 @@ impl ModuleLoadPreparer {
           // the actual graph on the first run and then getting the Arc<ModuleGraph>
           // back from the return value.
           graph.clone(),
-          check::CheckOptions {
+          CheckOptions {
             build_fast_check_graph: true,
             lib,
-            log_ignored_options: false,
             reload: self.options.reload_flag(),
             type_check_mode: self.options.type_check_mode(),
           },
@@ -236,8 +246,13 @@ impl ModuleLoadPreparer {
     &self,
     graph: &ModuleGraph,
     roots: &[ModuleSpecifier],
+    allow_unknown_media_types: bool,
   ) -> Result<(), JsErrorBox> {
-    self.module_graph_builder.graph_roots_valid(graph, roots)
+    self.module_graph_builder.graph_roots_valid(
+      graph,
+      roots,
+      allow_unknown_media_types,
+    )
   }
 }
 
@@ -606,12 +621,13 @@ impl<TGraphContainer: ModuleGraphContainer>
     } else if referrer == "." {
       // main module, use the initial cwd
       deno_core::resolve_path(referrer, &self.shared.initial_cwd)
-        .map_err(|e| e.into())
+        .map_err(|e| JsErrorBox::from_err(e).into())
     } else {
       // this cwd check is slow, so try to avoid it
       let cwd = std::env::current_dir()
         .map_err(|e| JsErrorBox::from_err(UnableToGetCwdError(e)))?;
-      deno_core::resolve_path(referrer, &cwd).map_err(|e| e.into())
+      deno_core::resolve_path(referrer, &cwd)
+        .map_err(|e| JsErrorBox::from_err(e).into())
     }
   }
 
@@ -666,7 +682,12 @@ impl<TGraphContainer: ModuleGraphContainer>
             ResolutionMode::Import,
             NodeResolutionKind::Execution,
           )
-          .map_err(|e| JsErrorBox::from_err(e).into());
+          .map_err(|e| JsErrorBox::from_err(e).into())
+          .and_then(|url_or_path| {
+            url_or_path
+              .into_url()
+              .map_err(|e| JsErrorBox::from_err(e).into())
+          });
       }
     }
 
@@ -695,6 +716,8 @@ impl<TGraphContainer: ModuleGraphContainer>
               source,
             })
           })?
+          .into_url()
+          .map_err(JsErrorBox::from_err)?
       }
       Some(Module::Node(module)) => module.specifier.clone(),
       Some(Module::Js(module)) => module.specifier.clone(),
@@ -1060,7 +1083,11 @@ impl<TGraphContainer: ModuleGraphContainer> ModuleLoader
           log::debug!("Skipping prepare module load.");
           // roots are already validated so we can skip those
           if !graph.roots.contains(&specifier) {
-            module_load_preparer.graph_roots_valid(&graph, &[specifier])?;
+            module_load_preparer.graph_roots_valid(
+              &graph,
+              &[specifier],
+              false,
+            )?;
           }
           return Ok(());
         }
@@ -1079,10 +1106,13 @@ impl<TGraphContainer: ModuleGraphContainer> ModuleLoader
         .prepare_module_load(
           graph,
           &[specifier],
-          is_dynamic,
-          lib,
-          permissions,
-          None,
+          PrepareModuleLoadOptions {
+            is_dynamic,
+            lib,
+            permissions,
+            ext_overwrite: None,
+            allow_unknown_media_types: false,
+          },
         )
         .await
         .map_err(JsErrorBox::from_err)?;
@@ -1257,8 +1287,7 @@ impl<TGraphContainer: ModuleGraphContainer> NodeRequireLoader
       let specifier = deno_path_util::url_from_file_path(path)
         .map_err(JsErrorBox::from_err)?;
       if self.in_npm_pkg_checker.in_npm_package(&specifier) {
-        return Err(JsErrorBox::from_err(NotSupportedKindInNpmError {
-          media_type,
+        return Err(JsErrorBox::from_err(StrippingTypesNodeModulesError {
           specifier,
         }));
       }

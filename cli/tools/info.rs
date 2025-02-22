@@ -56,33 +56,36 @@ pub async fn info(
     let cwd_url =
       url::Url::from_directory_path(cli_options.initial_cwd()).unwrap();
 
-    let maybe_import_specifier = if let Ok(resolved) =
-      resolver.resolve(&specifier, &cwd_url)
-    {
+    let maybe_import_specifier = if let Ok(resolved) = resolver.resolve(
+      &specifier,
+      &cwd_url,
+      deno_resolver::workspace::ResolutionKind::Execution,
+    ) {
       match resolved {
-        deno_config::workspace::MappedResolution::Normal {
-          specifier, ..
-        }
-        | deno_config::workspace::MappedResolution::ImportMap {
+        deno_resolver::workspace::MappedResolution::Normal {
           specifier,
           ..
         }
-        | deno_config::workspace::MappedResolution::WorkspaceJsrPackage {
+        | deno_resolver::workspace::MappedResolution::WorkspaceJsrPackage {
           specifier,
           ..
         } => Some(specifier),
-        deno_config::workspace::MappedResolution::WorkspaceNpmPackage {
+        deno_resolver::workspace::MappedResolution::WorkspaceNpmPackage {
           target_pkg_json,
           sub_path,
           ..
-        } => Some(node_resolver.resolve_package_subpath_from_deno_module(
-          target_pkg_json.clone().dir_path(),
-          sub_path.as_deref(),
-          Some(&cwd_url),
-          node_resolver::ResolutionMode::Import,
-          node_resolver::NodeResolutionKind::Execution,
-        )?),
-        deno_config::workspace::MappedResolution::PackageJson {
+        } => Some(
+          node_resolver
+            .resolve_package_subpath_from_deno_module(
+              target_pkg_json.clone().dir_path(),
+              sub_path.as_deref(),
+              Some(&cwd_url),
+              node_resolver::ResolutionMode::Import,
+              node_resolver::NodeResolutionKind::Execution,
+            )?
+            .into_url()?,
+        ),
+        deno_resolver::workspace::MappedResolution::PackageJson {
           alias,
           sub_path,
           dep_result,
@@ -94,13 +97,17 @@ pub async fn info(
                 alias,
                 version_req,
               )?;
-            Some(node_resolver.resolve_package_subpath_from_deno_module(
-              pkg_folder,
-              sub_path.as_deref(),
-              Some(&cwd_url),
-              node_resolver::ResolutionMode::Import,
-              node_resolver::NodeResolutionKind::Execution,
-            )?)
+            Some(
+              node_resolver
+                .resolve_package_subpath_from_deno_module(
+                  pkg_folder,
+                  sub_path.as_deref(),
+                  Some(&cwd_url),
+                  node_resolver::ResolutionMode::Import,
+                  node_resolver::NodeResolutionKind::Execution,
+                )?
+                .into_url()?,
+            )
           }
           deno_package_json::PackageJsonDepValue::Req(req) => {
             Some(ModuleSpecifier::parse(&format!(

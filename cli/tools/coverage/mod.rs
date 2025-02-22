@@ -74,14 +74,15 @@ impl crate::worker::CoverageCollector for CoverageCollector {
 
     let script_coverages = self.take_precise_coverage().await?.result;
     for script_coverage in script_coverages {
-      // Filter out internal and http/https JS files and eval'd scripts
-      // from being included in coverage reports
-      if script_coverage.url.starts_with("ext:")
+      // Filter out internal and http/https JS files, eval'd scripts,
+      // and scripts with invalid urls from being included in coverage reports
+      if script_coverage.url.is_empty()
+        || script_coverage.url.starts_with("ext:")
         || script_coverage.url.starts_with("[ext:")
         || script_coverage.url.starts_with("http:")
         || script_coverage.url.starts_with("https:")
         || script_coverage.url.starts_with("node:")
-        || script_coverage.url.is_empty()
+        || Url::parse(&script_coverage.url).is_err()
       {
         continue;
       }
@@ -574,6 +575,8 @@ pub fn cover_files(
     )
   };
 
+  let mut file_reports = Vec::with_capacity(script_coverages.len());
+
   for script_coverage in script_coverages {
     let module_specifier = deno_core::resolve_url_or_path(
       &script_coverage.url,
@@ -608,7 +611,7 @@ pub fn cover_files(
         let module_kind = ModuleKind::from_is_cjs(
           cjs_tracker.is_maybe_cjs(&file.specifier, file.media_type)?,
         );
-        Some(match emitter.maybe_cached_emit(&file.specifier, module_kind, &file.source) {
+        Some(match emitter.maybe_cached_emit(&file.specifier, module_kind, &file.source)? {
           Some(code) => code,
           None => {
             return Err(anyhow!(
@@ -637,11 +640,11 @@ pub fn cover_files(
     );
 
     if !coverage_report.found_lines.is_empty() {
-      reporter.report(&coverage_report, &original_source)?;
+      file_reports.push((coverage_report, original_source.to_string()));
     }
   }
 
-  reporter.done(&coverage_root);
+  reporter.done(&coverage_root, &file_reports);
 
   Ok(())
 }
